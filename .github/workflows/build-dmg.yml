@@ -1,0 +1,50 @@
+name: Build Mac DMG
+
+# Push a tag like v1.0.1 to publish a release. Installed apps see it and offer to update.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14        # Apple Silicon
+          - runner: macos-15-intel  # Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0"; fi
+          ./build_dmg.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.runner }}
+          path: dist/*.dmg
+
+  release:
+    needs: build
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dmgs
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls dmgs
+          gh release create "$GITHUB_REF_NAME" dmgs/*.dmg --repo "$GITHUB_REPOSITORY" \
+            --title "YouTube to MP3 ${GITHUB_REF_NAME#v}" --generate-notes

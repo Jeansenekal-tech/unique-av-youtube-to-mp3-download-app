@@ -15,10 +15,9 @@ import sys
 import threading
 from pathlib import Path
 
-try:
-    import yt_dlp
-except ImportError:
-    sys.exit("yt-dlp is not installed. Run ./install.sh first.")
+import updater
+
+updater.activate_ytdlp()  # yt_dlp itself is imported lazily, so a background update can still take effect
 
 DEFAULT_OUTPUT = Path.home() / "Music" / "YouTube MP3"
 QUALITIES = ["320", "256", "192", "128"]
@@ -42,7 +41,17 @@ class _QuietLogger:
 
 
 def find_ffmpeg():
-    """Finder-launched apps get a minimal PATH, so also look in Homebrew's usual places."""
+    """Prefer the ffmpeg bundled with the app; otherwise look on PATH and in Homebrew's usual places
+    (Finder-launched apps get a minimal PATH)."""
+    bundled = sorted(Path(getattr(sys, "_MEIPASS", "/nonexistent")).glob("imageio_ffmpeg/binaries/ffmpeg-*"))
+    if bundled:
+        return str(bundled[0])
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -54,6 +63,8 @@ def find_ffmpeg():
 
 def download_all(links, output_dir, quality, log, progress, should_stop=lambda: False, numbered=True):
     """Download links one at a time, in order. Returns the list of links that failed."""
+    import yt_dlp
+
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg was not found. Install it with: brew install ffmpeg")
@@ -114,6 +125,12 @@ def run_cli(args):
     if not links:
         sys.exit("No links found.")
 
+    try:
+        if new_version := updater.update_ytdlp():
+            print(f"Updated yt-dlp to {new_version}")
+    except Exception as error:
+        print(f"(Couldn't check for yt-dlp updates: {error})")
+
     def progress(index, fraction):
         print(f"\r    {fraction:4.0%}", end="", flush=True)
         if fraction >= 1:
@@ -124,6 +141,35 @@ def run_cli(args):
     if failed:
         print("Failed links:\n  " + "\n  ".join(failed))
         sys.exit(1)
+
+
+def run_self_test():
+    """Used by the build: convert a generated tone served over local HTTP, using the app's own yt-dlp and ffmpeg."""
+    import functools
+    import http.server
+    import tempfile
+
+    import yt_dlp
+
+    for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        os.environ.pop(name, None)
+    ffmpeg = find_ffmpeg()
+    print(f"app {updater.__version__}, yt-dlp {yt_dlp.version.__version__} from {yt_dlp.__file__}, ffmpeg {ffmpeg}")
+    work = Path(tempfile.mkdtemp())
+    subprocess.run(
+        [ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(work / "tone.wav")],
+        check=True,
+    )
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(work))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/tone.wav"
+    failed = download_all([url], work / "out", "128", print, lambda i, f: None)
+    server.shutdown()
+    mp3s = list((work / "out").glob("01 - *.mp3"))
+    if failed or not mp3s or mp3s[0].stat().st_size == 0:
+        sys.exit("SELF-TEST FAILED")
+    print(f"SELF-TEST OK: {mp3s[0].name}")
 
 
 def run_gui():
@@ -202,6 +248,13 @@ def run_gui():
     progress_bar.pack(fill="x")
     ttk.Label(frame, textvariable=status_var).pack(anchor="w", pady=(4, 4))
 
+    footer = ttk.Frame(frame)
+    footer.pack(side="bottom", fill="x", pady=(8, 0))
+    version_var = tk.StringVar(value=f"Version {updater.__version__}")
+    ttk.Label(footer, textvariable=version_var, foreground="gray").pack(side="left")
+    update_button = ttk.Button(footer, text="Check for updates")
+    update_button.pack(side="right")
+
     log_box = ScrolledText(frame, height=10, state="disabled")
     log_box.pack(fill="both", expand=True)
 
@@ -249,6 +302,54 @@ def run_gui():
         start_button.configure(state="normal")
         stop_button.configure(state="disabled")
 
+    def check_updates(manual):
+        """Runs in a background thread: refresh yt-dlp, then look for a new app version."""
+        try:
+            if new_version := updater.update_ytdlp():
+                events.put(("log", f"Updated the YouTube downloader engine (yt-dlp) to {new_version}."))
+        except Exception as error:
+            if manual:
+                events.put(("log", f"Couldn't update yt-dlp: {error}"))
+        try:
+            found = updater.check_app_update()
+            if found:
+                events.put(("app_update", *found))
+            elif manual:
+                events.put(("info", f"You have the latest version ({updater.__version__})."))
+        except Exception as error:
+            if manual:
+                events.put(("info", f"Couldn't check for updates: {error}"))
+
+    def start_update_check(manual):
+        threading.Thread(target=check_updates, args=(manual,), daemon=True).start()
+
+    def offer_app_update(version, url):
+        if not messagebox.askyesno(
+            "Update available",
+            f"YouTube to MP3 {version} is available (you have {updater.__version__}).\n\nDownload and install it now?",
+        ):
+            return
+        update_button.configure(state="disabled")
+        status_var.set(f"Downloading version {version}…")
+
+        def worker():
+            try:
+                dmg = updater.download_dmg(url, lambda f: events.put(("progress", f, f"Downloading update… {f:.0%}")))
+                events.put(("dmg_ready", dmg))
+            except Exception as error:
+                events.put(("info", f"Update download failed: {error}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def install_update(dmg):
+        if updater.can_self_install() and not stop_button.instate(["!disabled"]):
+            updater.install_and_relaunch(dmg)
+            root.destroy()
+        else:
+            # Running from the DMG, a read-only location, or mid-download: let the user drag it over.
+            subprocess.run(["open", str(dmg)])
+            status_var.set("Update downloaded. Drag the new app into Applications to finish.")
+
     def poll():
         try:
             while True:
@@ -269,11 +370,20 @@ def run_gui():
                     finish()
                     status_var.set("Error.")
                     messagebox.showerror("YouTube to MP3", event[1])
+                elif kind == "info":
+                    update_button.configure(state="normal")
+                    messagebox.showinfo("YouTube to MP3", event[1])
+                elif kind == "app_update":
+                    offer_app_update(event[1], event[2])
+                elif kind == "dmg_ready":
+                    install_update(event[1])
         except queue.Empty:
             pass
         root.after(100, poll)
 
     start_button.configure(command=start)
+    update_button.configure(command=lambda: start_update_check(manual=True))
+    start_update_check(manual=False)
     stop_button.configure(command=lambda: (stop_flag.set(), status_var.set("Stopping after this song…")))
     poll()
     root.mainloop()
@@ -285,9 +395,12 @@ def main():
     parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT), help="output folder")
     parser.add_argument("-q", "--quality", default="320", choices=QUALITIES, help="MP3 bitrate in kbps")
     parser.add_argument("--no-numbers", action="store_true", help="don't prefix files with 01, 02, …")
-    args = parser.parse_args()
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    args, _ = parser.parse_known_args()  # ignore anything macOS adds when launching the app
 
-    if args.cli:
+    if args.self_test:
+        run_self_test()
+    elif args.cli:
         run_cli(args)
     else:
         run_gui()
