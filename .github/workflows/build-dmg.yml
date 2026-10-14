@@ -1,0 +1,78 @@
+name: Build Mac DMG
+
+# Every push builds the DMGs (downloadable from the run's Artifacts).
+# A push to main whose VERSION has no release yet publishes one; installed apps then offer the update.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14        # Apple Silicon
+          - runner: macos-15-intel  # Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: ./build_dmg.sh "$(cat VERSION)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.runner }}
+          path: dist/*.dmg
+
+  install-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+          - runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg-${{ matrix.runner }}
+          path: dmg
+      - name: Install and test like a user
+        run: ci/test_installed_app.sh dmg/*.dmg
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: install-test-${{ matrix.runner }}
+          path: ${{ runner.temp }}/install-test/*.png
+          if-no-files-found: ignore
+
+  release:
+    needs: [build, install-test]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.install-test.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dmgs
+          merge-multiple: true
+      - name: Publish release if this version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(cat VERSION)"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "v$VERSION is already released; bump VERSION to publish a new one."
+            exit 0
+          fi
+          ls dmgs
+          gh release create "v$VERSION" dmgs/*.dmg --target "$GITHUB_SHA" \
+            --title "YouTube to MP3 $VERSION" --generate-notes
