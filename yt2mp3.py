@@ -396,10 +396,16 @@ def main():
     parser.add_argument("-q", "--quality", default="320", choices=QUALITIES, help="MP3 bitrate in kbps")
     parser.add_argument("--no-numbers", action="store_true", help="don't prefix files with 01, 02, …")
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--install-update", metavar="DMG", help=argparse.SUPPRESS)  # used by CI to test updating
     args, _ = parser.parse_known_args()  # ignore anything macOS adds when launching the app
 
     if args.self_test:
         run_self_test()
+    elif args.install_update:
+        if not updater.can_self_install():
+            sys.exit(f"Can't update in place: {updater.app_bundle_path()}")
+        updater.install_and_relaunch(Path(args.install_update))
+        print("Update handed to installer; exiting.")
     elif args.cli:
         run_cli(args)
     else:

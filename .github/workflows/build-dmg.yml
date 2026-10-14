@@ -30,9 +30,33 @@ jobs:
           name: dmg-${{ matrix.runner }}
           path: dist/*.dmg
 
-  release:
+  install-test:
     needs: build
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+          - runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg-${{ matrix.runner }}
+          path: dmg
+      - name: Install and test like a user
+        run: ci/test_installed_app.sh dmg/*.dmg
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: install-test-${{ matrix.runner }}
+          path: ${{ runner.temp }}/install-test/*.png
+          if-no-files-found: ignore
+
+  release:
+    needs: [build, install-test]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.install-test.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
