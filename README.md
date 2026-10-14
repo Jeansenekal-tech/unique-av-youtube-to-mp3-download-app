@@ -39,13 +39,12 @@ There's also a **Check for updates** button at the bottom of the window.
 
 ## Publishing a new version
 
-Push a version tag; GitHub Actions builds the DMGs on Apple Silicon and Intel Macs,
-checks that each one can really make an MP3, and publishes a release. Installed
-apps then offer the update.
+Change the number in `VERSION` (e.g. `1.0.1`) and push it to `main`. GitHub Actions
+builds the DMGs on Apple Silicon and Intel Macs, checks that each one can really
+make an MP3, and publishes a release. Installed apps then offer the update.
 
-```bash
-git tag v1.0.1 && git push origin v1.0.1
-```
+Every push to any branch also builds the DMGs; you can download them from the
+workflow run's **Artifacts** section without publishing a release.
 
 To build locally on a Mac: `./build_dmg.sh 1.0.1` (output in `dist/`).
 

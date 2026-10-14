@@ -1,9 +1,9 @@
 name: Build Mac DMG
 
-# Push a tag like v1.0.1 to publish a release. Installed apps see it and offer to update.
+# Every push builds the DMGs (downloadable from the run's Artifacts).
+# A push to main whose VERSION has no release yet publishes one; installed apps then offer the update.
 on:
   push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -24,9 +24,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0"; fi
-          ./build_dmg.sh "$VERSION"
+        run: ./build_dmg.sh "$(cat VERSION)"
       - uses: actions/upload-artifact@v4
         with:
           name: dmg-${{ matrix.runner }}
@@ -34,17 +32,23 @@ jobs:
 
   release:
     needs: build
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dmgs
           merge-multiple: true
-      - name: Publish release
+      - name: Publish release if this version is new
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          VERSION="$(cat VERSION)"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "v$VERSION is already released; bump VERSION to publish a new one."
+            exit 0
+          fi
           ls dmgs
-          gh release create "$GITHUB_REF_NAME" dmgs/*.dmg --repo "$GITHUB_REPOSITORY" \
-            --title "YouTube to MP3 ${GITHUB_REF_NAME#v}" --generate-notes
+          gh release create "v$VERSION" dmgs/*.dmg --target "$GITHUB_SHA" \
+            --title "YouTube to MP3 $VERSION" --generate-notes
